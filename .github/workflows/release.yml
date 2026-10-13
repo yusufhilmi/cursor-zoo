@@ -1,0 +1,110 @@
+name: Release
+
+# Push a tag like v0.2.0 and this builds the app, attaches a zip to a GitHub
+# Release, and writes the notes from the commits since the previous tag.
+#
+# It uses the workflow's own GITHUB_TOKEN - the one GitHub mints per run with
+# the permissions listed below. No personal credentials are involved anywhere.
+#
+# Signing and notarisation are optional and switch on only when the secrets
+# exist (see "Signing" below). Without them the zip is ad-hoc signed and users
+# must right-click > Open, or allow it under Privacy & Security on first launch.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      APP: Cursor Zoo.app
+      # Secrets are not readable from `if:` directly, so surface their presence here.
+      HAS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      HAS_NOTARY:  ${{ secrets.NOTARY_APPLE_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" Resources/Info.plist
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build app bundle
+        run: ./build.sh
+
+      - name: Prove it still draws
+        run: .build/release/CursorZoo --selftest selftest.png
+
+      # ---- Signing -----------------------------------------------------------
+      # Needs an Apple Developer account ($99/yr) and these repository secrets:
+      #   MACOS_CERTIFICATE_P12       base64 of a "Developer ID Application" .p12
+      #   MACOS_CERTIFICATE_PASSWORD  the .p12 password
+      #   MACOS_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+      - name: Import signing certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          P12_B64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A \
+            -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+
+      - name: Sign with Developer ID
+        if: env.HAS_SIGNING == 'true'
+        env:
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
+      - name: Zip
+        # ditto preserves the bundle's resource forks and symlinks; plain zip does not.
+        run: ditto -c -k --keepParent "$APP" "CursorZoo-$VERSION.zip"
+
+      # ---- Notarisation ------------------------------------------------------
+      # Lets Gatekeeper open the app with no warning at all. Needs, in addition:
+      #   NOTARY_APPLE_ID        the Apple ID email
+      #   NOTARY_TEAM_ID         the 10-character team id
+      #   NOTARY_APP_PASSWORD    an app-specific password from appleid.apple.com
+      - name: Notarise and staple
+        if: env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit "CursorZoo-$VERSION.zip" \
+            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$APP"
+          # Re-zip so the stapled ticket ships inside the download.
+          rm "CursorZoo-$VERSION.zip"
+          ditto -c -k --keepParent "$APP" "CursorZoo-$VERSION.zip"
+
+      - name: Checksum
+        run: shasum -a 256 "CursorZoo-$VERSION.zip" > "CursorZoo-$VERSION.zip.sha256"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "CursorZoo-$VERSION.zip" \
+            "CursorZoo-$VERSION.zip.sha256" \
+            --title "Cursor Zoo $VERSION" \
+            --generate-notes
