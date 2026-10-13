@@ -9,12 +9,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let character = "character"
         static let size = "size"
         static let replaceMode = "replaceMode"
+        static let bubbles = "bubbles"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         restorePreferences()
 
-        tracker.onTick = { [weak self] state in self?.overlay.update(state) }
+        tracker.onTick = { [weak self] state in
+            self?.overlay.update(state)
+            CursorHider.shared.heartbeat()
+        }
         tracker.start()
 
         buildStatusItem()
@@ -52,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Replacing the pointer is the whole point, so it is on unless turned off.
         let replace = defaults.object(forKey: Key.replaceMode) as? Bool ?? true
         overlay.setReplaceMode(replace)
+        overlay.setBubbles(defaults.bool(forKey: Key.bubbles))
     }
 
     // MARK: - Menu bar
@@ -87,6 +92,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         replace.target = self
         replace.state = overlay.replaceMode ? .on : .off
         menu.addItem(replace)
+
+        let bubbles = NSMenuItem(title: "Speech bubbles",
+                                 action: #selector(toggleBubbles),
+                                 keyEquivalent: "")
+        bubbles.target = self
+        bubbles.state = overlay.bubbles ? .on : .off
+        menu.addItem(bubbles)
 
         let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
         let sizeMenu = NSMenu()
@@ -136,6 +148,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let enabled = !overlay.replaceMode
         overlay.setReplaceMode(enabled)
         UserDefaults.standard.set(enabled, forKey: Key.replaceMode)
+        statusItem.menu = buildMenu()
+    }
+
+    @objc private func toggleBubbles() {
+        let enabled = !overlay.bubbles
+        overlay.setBubbles(enabled)
+        UserDefaults.standard.set(enabled, forKey: Key.bubbles)
         statusItem.menu = buildMenu()
     }
 

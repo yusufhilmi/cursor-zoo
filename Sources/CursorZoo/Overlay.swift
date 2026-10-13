@@ -38,6 +38,8 @@ final class OverlayController {
     private(set) var size: CharacterSize = .medium
     /// True when the sprite stands in for the real pointer rather than escorting it.
     private(set) var replaceMode = true
+    /// Speech bubbles are a garnish; the animation has to carry the click alone.
+    private(set) var bubbles = false
 
     var isPaused = false {
         didSet {
@@ -54,7 +56,8 @@ final class OverlayController {
         windows.forEach { $0.orderOut(nil) }
         windows = NSScreen.screens.map { screen in
             let window = OverlayWindow(screen: screen)
-            window.characterView.configure(character: character, size: size, replaceMode: replaceMode)
+            window.characterView.configure(character: character, size: size,
+                                           replaceMode: replaceMode, bubbles: bubbles)
             window.characterView.isHidden = isPaused
             return window
         }
@@ -76,9 +79,15 @@ final class OverlayController {
         CursorHider.shared.setReplaceMode(enabled)
     }
 
+    func setBubbles(_ enabled: Bool) {
+        bubbles = enabled
+        reconfigure()
+    }
+
     private func reconfigure() {
         windows.forEach {
-            $0.characterView.configure(character: character, size: size, replaceMode: replaceMode)
+            $0.characterView.configure(character: character, size: size,
+                                       replaceMode: replaceMode, bubbles: bubbles)
         }
     }
 
