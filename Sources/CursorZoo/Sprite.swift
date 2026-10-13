@@ -1,40 +1,34 @@
 import AppKit
 
-/// Rasterises placeholder art. Everything here is swapped out the moment real
-/// sprite sheets land; nothing else in the app knows what a glyph is.
+/// Rasterises the speech bubbles. Characters themselves are vector rigs.
 enum Sprite {
     private static var cache: [String: CGImage] = [:]
 
-    static func glyph(_ text: String, points: CGFloat) -> CGImage? {
-        let key = "g:\(text):\(points)"
-        if let hit = cache[key] { return hit }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: points)
-        ]
-        guard let image = draw(NSAttributedString(string: text, attributes: attrs),
-                               padding: 6, background: nil) else { return nil }
-        cache[key] = image
-        return image
-    }
+    /// Two voices, straight from the playground: a quiet white pill for ordinary
+    /// clicks and a loud Polymet-orange one for the big moments.
+    enum BubbleStyle { case soft, loud }
 
-    static func bubble(_ text: String, points: CGFloat) -> CGImage? {
-        let key = "b:\(text):\(points)"
+    static func bubble(_ text: String, points: CGFloat, style: BubbleStyle) -> CGImage? {
+        let key = "b:\(text):\(points):\(style)"
         if let hit = cache[key] { return hit }
+        let orange = NSColor(srgbRed: 0.98, green: 0.33, blue: 0.09, alpha: 1.0)
+        let ink = NSColor(srgbRed: 0.16, green: 0.14, blue: 0.13, alpha: 1.0)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: points, weight: .bold),
-            .foregroundColor: NSColor.white
+            .foregroundColor: style == .loud ? NSColor.white : ink
         ]
-        // Polymet orange, so the app reads as the same family as the playground.
-        let fill = NSColor(srgbRed: 0.98, green: 0.33, blue: 0.09, alpha: 1.0)
+        let fill = style == .loud ? orange : NSColor.white
+        let edge = style == .loud ? nil : NSColor(white: 0.82, alpha: 1)
         guard let image = draw(NSAttributedString(string: text, attributes: attrs),
-                               padding: 9, background: fill) else { return nil }
+                               padding: 9, background: fill, edge: edge) else { return nil }
         cache[key] = image
         return image
     }
 
     private static func draw(_ string: NSAttributedString,
                              padding: CGFloat,
-                             background: NSColor?) -> CGImage? {
+                             background: NSColor?,
+                             edge: NSColor?) -> CGImage? {
         let measured = string.boundingRect(
             with: CGSize(width: 2000, height: 2000),
             options: [.usesLineFragmentOrigin, .usesFontLeading])
@@ -56,12 +50,18 @@ enum Sprite {
         NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
 
         if let background {
-            let rect = CGRect(origin: .zero, size: size)
+            let inset: CGFloat = edge == nil ? 0 : 0.75
+            let rect = CGRect(origin: .zero, size: size).insetBy(dx: inset, dy: inset)
             let path = NSBezierPath(roundedRect: rect,
-                                    xRadius: size.height / 2,
-                                    yRadius: size.height / 2)
+                                    xRadius: rect.height / 2,
+                                    yRadius: rect.height / 2)
             background.setFill()
             path.fill()
+            if let edge {
+                edge.setStroke()
+                path.lineWidth = 1.5
+                path.stroke()
+            }
         }
         string.draw(at: CGPoint(x: padding, y: padding))
 

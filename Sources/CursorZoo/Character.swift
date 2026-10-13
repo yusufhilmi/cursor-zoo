@@ -8,30 +8,15 @@ enum Reaction: Hashable {
     case scroll
 }
 
-/// How a character physically responds to a reaction. Pure motion — no art needed.
-enum Move {
-    case squish      // flatten into the click
-    case recoil      // kick back the other way
-    case hop         // arc up and land
-    case spin        // rotate (driven by scroll delta)
-}
-
 struct Character {
     let id: String
     let name: String
-    /// Placeholder art. Swapped for real sprites from the Polymet pack later.
+    /// Menu-bar icon only. The character itself is a vector rig.
     let glyph: String
-    /// Where the character sits relative to the real pointer, in points.
-    /// The system cursor stays visible in companion mode, so we sit just off its tip.
-    let offset: CGSize
-    /// Resting rotation, radians. Lets wheels/blades sit at a natural angle.
-    let restAngle: CGFloat
-    /// How hard the character leans into its direction of travel. 0 = rigid.
-    let lean: CGFloat
-    let moves: [Reaction: Move]
+    /// Optional speech bubbles, off by default; see the menu.
     let bubbles: [Reaction: String]
+    let makeRig: () -> CharacterRig
 
-    func move(for r: Reaction) -> Move? { moves[r] }
     func bubble(for r: Reaction) -> String? { bubbles[r] }
 }
 
@@ -47,46 +32,35 @@ extension Character {
         id: "tiny-mouse",
         name: "Tiny Mouse",
         glyph: "🐭",
-        offset: CGSize(width: 13, height: -13),
-        restAngle: 0,
-        lean: 0.9,
-        moves: [.leftClick: .squish, .rightClick: .recoil, .doubleClick: .hop, .scroll: .spin],
-        bubbles: [.leftClick: "squeak!", .rightClick: "big backs!", .doubleClick: "thwack!", .scroll: "scurry"]
+        bubbles: [.leftClick: "squeak!", .rightClick: "eek!", .doubleClick: "thwack!"],
+        makeRig: { MouseRig() }
     )
 
-    /// Original little racer — wheels turn with the scroll wheel. Not anyone's IP.
+    /// Original top-down racer. Front bumper is the pointer.
     static let lilRacer = Character(
         id: "lil-racer",
         name: "Lil Racer",
         glyph: "🏎️",
-        offset: CGSize(width: 16, height: -12),
-        restAngle: 0,
-        lean: 1.4,
-        moves: [.leftClick: .recoil, .rightClick: .recoil, .doubleClick: .hop, .scroll: .spin],
-        bubbles: [.leftClick: "vroom", .rightClick: "skrrt", .doubleClick: "NITRO!", .scroll: "brrrr"]
+        bubbles: [.leftClick: "BEEP!", .rightClick: "skrrt!", .doubleClick: "NITRO!"],
+        makeRig: { RacerRig() }
     )
 
-    /// Original anime-style fighter. Left punch, right kick.
+    /// Original chibi ninja in shadow black. The point of the hood is the pointer.
     static let shadowNinja = Character(
         id: "shadow-ninja",
         name: "Shadow Ninja",
         glyph: "🥷",
-        offset: CGSize(width: 14, height: -14),
-        restAngle: 0,
-        lean: 0.7,
-        moves: [.leftClick: .squish, .rightClick: .recoil, .doubleClick: .hop, .scroll: .spin],
-        bubbles: [.leftClick: "PUNCH", .rightClick: "KICK", .doubleClick: "ULTIMATE!!", .scroll: "whoosh"]
+        bubbles: [.leftClick: "POW!", .rightClick: "BAM!", .doubleClick: "HIYAA!"],
+        makeRig: { NinjaRig() }
     )
 
+    /// Original chibi dragon. The snout is the pointer.
     static let pocketDragon = Character(
         id: "pocket-dragon",
         name: "Pocket Dragon",
         glyph: "🐉",
-        offset: CGSize(width: 15, height: -14),
-        restAngle: 0,
-        lean: 1.1,
-        moves: [.leftClick: .squish, .rightClick: .recoil, .doubleClick: .hop, .scroll: .spin],
-        bubbles: [.leftClick: "rawr", .rightClick: "hmph", .doubleClick: "FIRE!", .scroll: "flap flap"]
+        bubbles: [.leftClick: "chomp!", .rightClick: "whoosh!", .doubleClick: "FIRE!"],
+        makeRig: { DragonRig() }
     )
 }
 
@@ -96,8 +70,8 @@ enum CharacterSize: String, CaseIterable {
 
     var points: CGFloat {
         switch self {
-        case .small: return 22
-        case .medium: return 32
+        case .small: return 26
+        case .medium: return 34
         case .large: return 46
         }
     }
