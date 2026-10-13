@@ -1,157 +1,209 @@
 import AppKit
 
-/// `CursorZoo --selftest out.png` renders every character mid-reaction through the
-/// real `CharacterView`, so the drawing path can be checked without a screen
-/// recording grant (and without a human watching the pointer).
+/// `CursorZoo --selftest sheet.png` plays a scripted timeline through the real
+/// `CharacterView` for every character and renders a contact sheet: one row per
+/// character, one column per interaction, a crosshair on the hotspot in every cell.
+///
+/// The clock is simulated, so the sheet is deterministic apart from particle
+/// jitter, and nothing touches the real cursor. Exits non-zero on a blank render.
 enum SelfTest {
-    static func run(outputPath: String) -> Int32 {
-        let cell = CGSize(width: 240, height: 230)
-        let sheet = CGSize(width: cell.width * CGFloat(Character.all.count), height: cell.height)
+    private static let cell = CGSize(width: 280, height: 250)
+    private static let hotspot = CGPoint(x: 118, y: 150)
+    private static let points: CGFloat = 62
 
-        guard let ctx = CGContext(data: nil,
-                                  width: Int(sheet.width * 2),
-                                  height: Int(sheet.height * 2),
-                                  bitsPerComponent: 8,
-                                  bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else {
-            FileHandle.standardError.write(Data("selftest: could not allocate context\n".utf8))
-            return 1
-        }
-        ctx.scaleBy(x: 2, y: 2)
-        ctx.setFillColor(NSColor.white.cgColor)
-        ctx.fill(CGRect(origin: .zero, size: sheet))
-
-        for (index, character) in Character.all.enumerated() {
-            let view = CharacterView(frame: CGRect(origin: .zero, size: cell))
-            view.configure(character: character, size: .large, replaceMode: false)
-
-            let centre = CGPoint(x: cell.width / 2, y: cell.height / 2)
-            // Fire the double-click reaction, then let it run a little so the frame
-            // we capture is mid-hop with the bubble up, not at rest.
-            view.update(state(at: centre, reaction: .doubleClick), origin: .zero, onThisScreen: true)
-            Thread.sleep(forTimeInterval: 0.12)
-            view.update(state(at: centre, reaction: nil), origin: .zero, onThisScreen: true)
-
-            ctx.saveGState()
-            ctx.translateBy(x: cell.width * CGFloat(index), y: 0)
-            view.layer?.render(in: ctx)
-
-            let label = NSAttributedString(string: character.name, attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: NSColor.black.withAlphaComponent(0.55)
-            ])
-            let previous = NSGraphicsContext.current
-            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-            label.draw(at: CGPoint(x: 14, y: 14))
-            NSGraphicsContext.current = previous
-            ctx.restoreGState()
-        }
-
-        guard let image = ctx.makeImage() else { return 1 }
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]) else { return 1 }
-        do {
-            try data.write(to: URL(fileURLWithPath: outputPath))
-        } catch {
-            FileHandle.standardError.write(Data("selftest: \(error)\n".utf8))
-            return 1
-        }
-
-        // A blank sheet still writes a valid PNG, so assert something was drawn.
-        let drawn = nonWhitePixelCount(image)
-        print("selftest: wrote \(outputPath) (\(image.width)x\(image.height), \(drawn) painted pixels)")
-        return drawn > 5000 ? 0 : 1
+    private struct Scenario {
+        let name: String
+        let play: (Driver) -> Void
     }
 
-    private static func state(at point: CGPoint, reaction: Reaction?) -> PointerState {
-        PointerState(location: point,
-                     velocity: CGVector(dx: 0, dy: 0),
-                     leftDown: false,
-                     rightDown: false,
-                     scrollDelta: 0,
-                     reaction: reaction,
-                     dt: 1.0 / 60.0)
-    }
+    private static let scenarios: [Scenario] = [
+        Scenario(name: "idle") { $0.hold(0.6) },
+        Scenario(name: "left click") { d in
+            d.hold(0.4); d.press(.leftClick); d.hold(0.075)
+        },
+        Scenario(name: "right click") { d in
+            d.hold(0.4); d.press(.rightClick); d.hold(0.09)
+        },
+        Scenario(name: "double click") { d in
+            d.hold(0.4); d.press(.leftClick); d.hold(0.15); d.press(.doubleClick); d.hold(0.17)
+        },
+        Scenario(name: "scroll") { d in
+            d.hold(0.3); d.scroll(frames: 14, delta: 6); d.hold(0.05)
+        },
+        Scenario(name: "move") { d in
+            // A curve, not a straight line: trails have to hold together through turns.
+            d.jump(to: CGPoint(x: hotspot.x - 95, y: hotspot.y - 95))
+            d.hold(0.3)
+            d.curve(through: CGPoint(x: hotspot.x + 150, y: hotspot.y - 120), to: hotspot, over: 0.42)
+        }
+    ]
 
-    private static func nonWhitePixelCount(_ image: CGImage) -> Int {
-        guard let data = image.dataProvider?.data,
-              let bytes = CFDataGetBytePtr(data) else { return 0 }
-        let rowBytes = image.bytesPerRow
-        var count = 0
-        for y in stride(from: 0, to: image.height, by: 2) {
-            for x in stride(from: 0, to: image.width, by: 2) {
-                let p = y * rowBytes + x * 4
-                if bytes[p] < 240 || bytes[p + 1] < 240 || bytes[p + 2] < 240 { count += 1 }
+    /// Steps a view through time at 120 Hz.
+    private final class Driver {
+        let view: CharacterView
+        private(set) var location: CGPoint
+        private var time: CFTimeInterval = 100
+        private let dt: CFTimeInterval = 1.0 / 120
+
+        init(view: CharacterView, at location: CGPoint) {
+            self.view = view
+            self.location = location
+        }
+
+        func hold(_ seconds: CFTimeInterval) {
+            for _ in 0..<Int(seconds / dt) { step(to: location) }
+        }
+
+        func press(_ reaction: Reaction) { step(to: location, reaction: reaction) }
+
+        func scroll(frames: Int, delta: CGFloat) {
+            for _ in 0..<frames { step(to: location, reaction: .scroll, scroll: delta) }
+        }
+
+        func jump(to point: CGPoint) { location = point }
+
+        func move(to target: CGPoint, over seconds: CFTimeInterval) {
+            let start = location
+            let steps = Int(seconds / dt)
+            for i in 1...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                step(to: CGPoint(x: start.x + (target.x - start.x) * t,
+                                 y: start.y + (target.y - start.y) * t))
             }
         }
-        return count
+
+        /// A quadratic curve from the current location through `control` to `target`.
+        func curve(through control: CGPoint, to target: CGPoint, over seconds: CFTimeInterval) {
+            let start = location
+            let steps = Int(seconds / dt)
+            for i in 1...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                step(to: Ease.bezier(start, control, target, t))
+            }
+        }
+
+        private func step(to point: CGPoint, reaction: Reaction? = nil, scroll: CGFloat = 0) {
+            let velocity = CGVector(dx: (point.x - location.x) / dt, dy: (point.y - location.y) / dt)
+            location = point
+            time += dt
+            view.update(PointerState(location: point, velocity: velocity,
+                                     leftDown: false, rightDown: false,
+                                     scrollDelta: scroll, reaction: reaction,
+                                     dt: dt, time: time),
+                        origin: .zero, onThisScreen: true)
+        }
     }
-}
 
-extension SelfTest {
-    /// `--mousetest out.png` renders the Tiny Mouse in a row of poses so the
-    /// artwork can be eyeballed without hiding anyone's real cursor.
-    static func renderMouse(outputPath: String) -> Int32 {
-        let poses: [(String, MousePose)] = [
-            ("rest",        MousePose()),
-            ("left paw",    MousePose(leftPaw: 1, squash: 0.8)),
-            ("right paw",   MousePose(rightPaw: 1, squash: 0.8)),
-            ("hop",         MousePose(leftPaw: 0.5, rightPaw: 0.5, hop: 1, tailPhase: 1.6)),
-            ("lean",        MousePose(lean: 0.4, tailPhase: 3.1))
-        ]
-        let cell = CGSize(width: 240, height: 250)
-        let sheet = CGSize(width: cell.width * CGFloat(poses.count), height: cell.height)
-
-        guard let ctx = CGContext(data: nil,
-                                  width: Int(sheet.width * 3),
-                                  height: Int(sheet.height * 3),
-                                  bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(),
+    static func run(outputPath: String) -> Int32 {
+        let rows = Character.all
+        let sheet = CGSize(width: cell.width * CGFloat(scenarios.count),
+                           height: cell.height * CGFloat(rows.count))
+        let scale: CGFloat = 2
+        guard let ctx = CGContext(data: nil, width: Int(sheet.width * scale),
+                                  height: Int(sheet.height * scale), bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return 1 }
-        ctx.scaleBy(x: 3, y: 3)
-        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.setFillColor(NSColor(white: 0.975, alpha: 1).cgColor)
         ctx.fill(CGRect(origin: .zero, size: sheet))
 
-        for (index, entry) in poses.enumerated() {
-            let container = CALayer()
-            container.frame = CGRect(origin: .zero, size: cell)
-            let node = TinyMouseNode()
-            node.apply(entry.1, size: 150)
-            // Put the nose where a pointer tip would be, and draw a crosshair on it
-            // to confirm the hotspot really is pinned to the nose.
-            let nose = CGPoint(x: cell.width / 2 + 28, y: cell.height - 42)
-            node.root.position = nose
-            container.addSublayer(node.root)
+        for (row, character) in rows.enumerated() {
+            for (column, scenario) in scenarios.enumerated() {
+                let view = CharacterView(frame: CGRect(origin: .zero, size: cell))
+                view.configure(character: character, size: .medium, replaceMode: true, bubbles: false)
+                view.sizeOverride = points
+                scenario.play(Driver(view: view, at: hotspot))
 
-            ctx.saveGState()
-            ctx.translateBy(x: cell.width * CGFloat(index), y: 0)
-            container.render(in: ctx)
-
-            ctx.setStrokeColor(NSColor.systemBlue.withAlphaComponent(0.9).cgColor)
-            ctx.setLineWidth(1)
-            ctx.move(to: CGPoint(x: nose.x - 12, y: nose.y)); ctx.addLine(to: CGPoint(x: nose.x + 12, y: nose.y))
-            ctx.move(to: CGPoint(x: nose.x, y: nose.y - 12)); ctx.addLine(to: CGPoint(x: nose.x, y: nose.y + 12))
-            ctx.strokePath()
-
-            let label = NSAttributedString(string: entry.0, attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-                .foregroundColor: NSColor.black.withAlphaComponent(0.6)
-            ])
-            let previous = NSGraphicsContext.current
-            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-            label.draw(at: CGPoint(x: 14, y: 12))
-            NSGraphicsContext.current = previous
-            ctx.restoreGState()
+                ctx.saveGState()
+                ctx.translateBy(x: cell.width * CGFloat(column),
+                                y: sheet.height - cell.height * CGFloat(row + 1))
+                ctx.setStrokeColor(NSColor(white: 0.88, alpha: 1).cgColor)
+                ctx.stroke(CGRect(origin: .zero, size: cell).insetBy(dx: 0.5, dy: 0.5))
+                view.layer?.render(in: ctx)
+                crosshair(ctx, at: hotspot)
+                label(ctx, "\(character.name) · \(scenario.name)")
+                ctx.restoreGState()
+            }
         }
 
         guard let image = ctx.makeImage(),
               let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
         else { return 1 }
-        try? data.write(to: URL(fileURLWithPath: outputPath))
-        print("mousetest: wrote \(outputPath) (\(image.width)x\(image.height))")
+        do { try data.write(to: URL(fileURLWithPath: outputPath)) } catch {
+            FileHandle.standardError.write(Data("selftest: \(error)\n".utf8))
+            return 1
+        }
+        let painted = paintedPixels(image)
+        print("selftest: wrote \(outputPath) (\(image.width)x\(image.height), \(painted) painted samples)")
+        return painted > 5000 * rows.count ? 0 : 1
+    }
+
+    /// `CursorZoo --trackstest out.png`: one long drive with the racer — an S-bend,
+    /// a hairpin, a fast run into a hard stop, then a donut — so the tyre marks can
+    /// be judged as a whole: smooth through turns, cutting inside curves, darker
+    /// where the tyres would slip.
+    static func runTracks(outputPath: String) -> Int32 {
+        let size = CGSize(width: 980, height: 560)
+        let view = CharacterView(frame: CGRect(origin: .zero, size: size))
+        view.configure(character: .lilRacer, size: .medium, replaceMode: true, bubbles: false)
+        view.sizeOverride = 56
+        let d = Driver(view: view, at: CGPoint(x: 90, y: 140))
+        d.hold(0.3)
+        d.curve(through: CGPoint(x: 300, y: 520), to: CGPoint(x: 520, y: 280), over: 0.75)
+        d.curve(through: CGPoint(x: 760, y: 40), to: CGPoint(x: 860, y: 320), over: 0.55)
+        d.curve(through: CGPoint(x: 900, y: 520), to: CGPoint(x: 640, y: 450), over: 0.4)
+        d.move(to: CGPoint(x: 420, y: 430), over: 0.16)
+        d.hold(0.2)
+        d.press(.rightClick)
+        d.hold(0.9)
+
+        guard let ctx = CGContext(data: nil, width: Int(size.width * 2), height: Int(size.height * 2),
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return 1 }
+        ctx.scaleBy(x: 2, y: 2)
+        ctx.setFillColor(NSColor(white: 0.975, alpha: 1).cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
+        view.layer?.render(in: ctx)
+        crosshair(ctx, at: d.location)
+        label(ctx, "Lil Racer · S-bend, hairpin, hard stop, donut")
+        guard let image = ctx.makeImage(),
+              let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+        else { return 1 }
+        do { try data.write(to: URL(fileURLWithPath: outputPath)) } catch { return 1 }
+        print("trackstest: wrote \(outputPath)")
         return 0
+    }
+
+    private static func crosshair(_ ctx: CGContext, at p: CGPoint) {
+        ctx.setStrokeColor(NSColor.systemBlue.cgColor)
+        ctx.setLineWidth(1)
+        ctx.move(to: CGPoint(x: p.x - 10, y: p.y)); ctx.addLine(to: CGPoint(x: p.x + 10, y: p.y))
+        ctx.move(to: CGPoint(x: p.x, y: p.y - 10)); ctx.addLine(to: CGPoint(x: p.x, y: p.y + 10))
+        ctx.strokePath()
+    }
+
+    private static func label(_ ctx: CGContext, _ text: String) {
+        let string = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.black.withAlphaComponent(0.55)
+        ])
+        let previous = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        string.draw(at: CGPoint(x: 10, y: 9))
+        NSGraphicsContext.current = previous
+    }
+
+    private static func paintedPixels(_ image: CGImage) -> Int {
+        guard let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return 0 }
+        var count = 0
+        for y in stride(from: 0, to: image.height, by: 2) {
+            for x in stride(from: 0, to: image.width, by: 2) {
+                let p = y * image.bytesPerRow + x * 4
+                if bytes[p] < 200 || bytes[p + 1] < 200 || bytes[p + 2] < 200 { count += 1 }
+            }
+        }
+        return count
     }
 }
