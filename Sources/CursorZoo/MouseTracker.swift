@@ -11,6 +11,9 @@ struct PointerState {
     /// At most one discrete reaction per frame.
     var reaction: Reaction?
     var dt: CFTimeInterval
+    /// Frame timestamp. Everything animates off this rather than reading the clock
+    /// itself, so the self-test can drive a whole timeline deterministically.
+    var time: CFTimeInterval
 }
 
 /// Follows the pointer at the display's refresh rate.
@@ -100,7 +103,8 @@ final class MouseTracker {
                              rightDown: right,
                              scrollDelta: scroll,
                              reaction: reaction,
-                             dt: dt))
+                             dt: dt,
+                             time: now))
     }
 
     deinit { stop() }

@@ -22,6 +22,11 @@ import CGSPrivate
 ///   that gives you a pointer back when a full-screen game crashes. It is the one
 ///   link in the chain this app cannot itself guarantee, so `restore-cursor.sh`
 ///   exists as a manual escape hatch.
+/// - A watchdog on a background queue covers the case none of the above can: the
+///   main thread *hanging*. A hang fires no signal, but it does stop the overlay
+///   drawing, which would leave you with neither pointer. Every frame bumps a
+///   heartbeat; if it goes stale for two seconds the watchdog shows the cursor, and
+///   the next healthy frame hides it again.
 final class CursorHider {
     static let shared = CursorHider()
 
@@ -29,11 +34,47 @@ final class CursorHider {
     private(set) var replaceModeEnabled = false
     /// Conditions where we must give the pointer back regardless of intent.
     private var suspensions = Set<String>()
+
+    // Shared with the watchdog queue, so only touched under `lock`.
+    private let lock = NSLock()
     private var isHidden = false
+    private var lastBeat: CFTimeInterval = 0
+    private var stalled = false
+    private var watchdog: DispatchSourceTimer?
 
     private init() {
         installSafetyNet()
         observeSystemState()
+        startWatchdog()
+    }
+
+    /// Called once per drawn frame from the display link.
+    func heartbeat() {
+        lock.lock()
+        lastBeat = CACurrentMediaTime()
+        let recovering = stalled
+        stalled = false
+        lock.unlock()
+        if recovering { sync() }
+    }
+
+    private func startWatchdog() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "cursorzoo.watchdog"))
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let stale = self.lastBeat > 0 && CACurrentMediaTime() - self.lastBeat > 2
+            let rescue = stale && self.isHidden && !self.stalled
+            if rescue {
+                self.stalled = true
+                self.isHidden = false
+                CGDisplayShowCursor(CGMainDisplayID())
+            }
+            self.lock.unlock()
+        }
+        timer.resume()
+        watchdog = timer
     }
 
     // MARK: - Intent
@@ -55,6 +96,8 @@ final class CursorHider {
 
     /// Hand the pointer back immediately and permanently, for quit.
     func restoreNow() {
+        lock.lock()
+        defer { lock.unlock() }
         if isHidden {
             CGDisplayShowCursor(CGMainDisplayID())
             isHidden = false
@@ -62,7 +105,9 @@ final class CursorHider {
     }
 
     private func sync() {
-        let shouldHide = replaceModeEnabled && suspensions.isEmpty
+        lock.lock()
+        defer { lock.unlock() }
+        let shouldHide = replaceModeEnabled && suspensions.isEmpty && !stalled
         guard shouldHide != isHidden else { return }
         if shouldHide {
             let connection = CGSMainConnectionID()
